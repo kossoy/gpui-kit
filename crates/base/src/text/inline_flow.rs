@@ -2,6 +2,7 @@ use std::{
     ops::Range,
     sync::{Arc, Mutex},
 };
+use unicode_segmentation::UnicodeSegmentation as _;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, AvailableSpace, Bounds, DefiniteLength, Element, ElementId,
@@ -562,7 +563,7 @@ fn line_ranges(
                                 highlights,
                                 start..end,
                                 text_style,
-                                font_size,
+                                wrap_width,
                                 window,
                             );
                         }
@@ -606,16 +607,18 @@ fn line_ranges(
 /// Appends the wrap fragments for `range` of `text`. The line wrapper
 /// measures text fragments in the body font, so a span whose highlight sets
 /// another family is shaped with the same run the renderer uses and enters
-/// the wrapper as one fixed-width element: it breaks around, not inside.
+/// the wrapper as measured elements. Oversized spans retain word boundaries;
+/// oversized words can break at grapheme boundaries without splitting Unicode.
 fn push_text_wrap_fragments<'a>(
     fragments: &mut Vec<WrapLineFragment<'a>>,
     text: &'a str,
     highlights: &[(Range<usize>, InlineHighlight)],
     range: Range<usize>,
     text_style: &TextStyle,
-    font_size: Pixels,
+    wrap_width: Pixels,
     window: &mut Window,
 ) {
+    let font_size = text_style.font_size.to_pixels(window.rem_size());
     let mut cursor = range.start;
     for (highlight_range, highlight) in highlights {
         if highlight.font_family.is_none() {
@@ -630,16 +633,33 @@ fn push_text_wrap_fragments<'a>(
             fragments.push(WrapLineFragment::text(&text[cursor..start]));
         }
         let span = &text[start..end];
-        let runs = text_runs(
-            span.len(),
-            text_style,
-            &[(0..span.len(), highlight.clone())],
-        );
-        let width = window
-            .text_system()
-            .layout_line(span, font_size, &runs, None)
-            .width;
-        fragments.push(WrapLineFragment::element(width, span.len()));
+        let measure = |text: &str| {
+            let runs = text_runs(
+                text.len(),
+                text_style,
+                &[(0..text.len(), highlight.clone())],
+            );
+            window
+                .text_system()
+                .layout_line(text, font_size, &runs, None)
+                .width
+        };
+        let width = measure(span);
+        if width <= wrap_width {
+            fragments.push(WrapLineFragment::element(width, span.len()));
+        } else {
+            for word in span.split_word_bounds() {
+                let width = measure(word);
+                if width <= wrap_width {
+                    fragments.push(WrapLineFragment::element(width, word.len()));
+                } else {
+                    for grapheme in word.graphemes(true) {
+                        fragments
+                            .push(WrapLineFragment::element(measure(grapheme), grapheme.len()));
+                    }
+                }
+            }
+        }
         cursor = end;
     }
     if cursor < range.end {
@@ -887,5 +907,56 @@ mod tests {
                 .any(|(text, y)| *text == "end" && *y > first_y),
             "the trailing word wraps to a second line: {text_lines:?}"
         );
+    }
+    #[test]
+    fn long_inline_code_wraps_in_mixed_flow() {
+        use super::super::inline::test_fonts::{BODY, MONO, WideMonoTextSystem};
+        use gpui::{Empty, TestApp};
+        let mut app = TestApp::with_text_system(Arc::new(WideMonoTextSystem));
+        let mut window = app.open_window(|_, _| Empty);
+        let style = TextStyle {
+            font_family: BODY.into(),
+            font_size: AbsoluteLength::Pixels(px(10.)),
+            ..Default::default()
+        };
+        for text in [
+            "one two three four five six",
+            "very_long_unbroken_identifier",
+            "你好世界你好世界你好世界",
+            "e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}e\u{301}",
+        ] {
+            let items = vec![
+                MeasureItem::Image {
+                    url: "https://example.com/icon.png".into(),
+                    width: None,
+                    height: None,
+                },
+                MeasureItem::Text {
+                    text: text.into(),
+                    links: vec![],
+                    highlights: vec![(
+                        0..text.len(),
+                        InlineHighlight {
+                            font_family: Some(MONO.into()),
+                            ..Default::default()
+                        },
+                    )],
+                },
+            ];
+            let image_sizes = vec![Some(size(px(10.), px(10.))), None];
+            let layout = window.update(|_, window, _| {
+                layout_flow(&items, &image_sizes, &style, Some(px(100.)), window)
+            });
+            assert!(layout.size.width <= px(100.), "{text:?}: {:?}", layout.size);
+            let reconstructed: String = layout
+                .fragments
+                .iter()
+                .filter_map(|fragment| match fragment {
+                    PositionedFragment::Text { text, .. } => Some(text.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reconstructed, text);
+        }
     }
 }
