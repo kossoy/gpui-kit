@@ -1359,7 +1359,7 @@ impl PartialEq for NodeContext {
 
 /// The highlight a text mark renders with. The link decoration is applied by
 /// the caller, which also has to record the link range.
-fn mark_highlight(mark: &TextMark, node_cx: &NodeContext) -> InlineHighlight {
+fn mark_highlight(mark: &TextMark, node_cx: &NodeContext, cx: &App) -> InlineHighlight {
     let mut highlight = HighlightStyle::default();
     if mark.bold {
         highlight.font_weight = Some(FontWeight::BOLD);
@@ -1382,7 +1382,7 @@ fn mark_highlight(mark: &TextMark, node_cx: &NodeContext) -> InlineHighlight {
     let mut font_family = None;
     if mark.code {
         highlight = highlight.highlight(node_cx.style.inline_code_highlight());
-        font_family = node_cx.style.inline_code_font_family().cloned();
+        font_family = Some(cx.theme().tokens.typography.mono.clone());
     }
     if let Some(color) = mark.highlight {
         highlight.background_color = Some(color);
@@ -1397,7 +1397,11 @@ impl Paragraph {
     /// The highlights over [`Self::text`], for measuring the paragraph with
     /// the runs it renders with. Link colors are left out: they do not move
     /// glyphs.
-    fn inline_highlights(&self, node_cx: &NodeContext) -> Vec<(Range<usize>, InlineHighlight)> {
+    fn inline_highlights(
+        &self,
+        node_cx: &NodeContext,
+        cx: &App,
+    ) -> Vec<(Range<usize>, InlineHighlight)> {
         let mut highlights = vec![];
         let mut offset = 0;
         for inline_node in &self.children {
@@ -1407,7 +1411,7 @@ impl Paragraph {
                 .map(|(range, mark)| {
                     (
                         (offset + range.start)..(offset + range.end),
-                        mark_highlight(mark, node_cx),
+                        mark_highlight(mark, node_cx, cx),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -1504,7 +1508,7 @@ impl Paragraph {
                 let mut node_highlights = vec![];
                 for (range, style) in &inline_node.marks {
                     let inner_range = (offset + range.start)..(offset + range.end);
-                    let mut highlight = mark_highlight(style, node_cx);
+                    let mut highlight = mark_highlight(style, node_cx, cx);
 
                     if let Some(mut link_mark) = style.link.clone() {
                         highlight.style.color = Some(node_cx.style.link());
@@ -1561,7 +1565,7 @@ impl Paragraph {
         has_image && has_text
     }
 
-    fn inline_flow_items(&self, node_cx: &NodeContext, _cx: &mut App) -> Vec<InlineFlowItem> {
+    fn inline_flow_items(&self, node_cx: &NodeContext, cx: &mut App) -> Vec<InlineFlowItem> {
         let mut items = Vec::new();
         let mut text = String::new();
         let mut highlights: Vec<(Range<usize>, InlineHighlight)> = vec![];
@@ -1601,7 +1605,7 @@ impl Paragraph {
                 let mut node_highlights = vec![];
                 for (range, style) in &inline_node.marks {
                     let inner_range = (offset + range.start)..(offset + range.end);
-                    let mut highlight = mark_highlight(style, node_cx);
+                    let mut highlight = mark_highlight(style, node_cx, cx);
 
                     if let Some(mut link_mark) = style.link.clone() {
                         highlight.style.color = Some(node_cx.style.link());
@@ -1656,6 +1660,7 @@ fn measure_table_columns(
     col_count: usize,
     node_cx: &NodeContext,
     window: &mut Window,
+    cx: &App,
 ) -> Vec<f32> {
     let text_style = window.text_style();
     let font_size = text_style.font_size.to_pixels(window.rem_size());
@@ -1666,7 +1671,7 @@ fn measure_table_columns(
                 continue;
             };
             let text = cell.children.text();
-            let highlights = cell.children.inline_highlights(node_cx);
+            let highlights = cell.children.inline_highlights(node_cx, cx);
             let mut w = 0.0_f32;
             let mut line_start = 0;
             for line in text.split('\n') {
@@ -2123,7 +2128,7 @@ impl BlockNode {
         const CELL_WRAP_MAX_PX: f32 = 480.0;
         const TABLE_BORDER_PX: f32 = 2.0; // the track's border_1, left + right
 
-        let col_w = measure_table_columns(table, col_count, node_cx, window);
+        let col_w = measure_table_columns(table, col_count, node_cx, window, cx);
         let style = &node_cx.style;
         // Nowrap cells (via the `table_cell` refinement, which cascades to
         // the cell text) must never shrink below their single-line content,
@@ -2520,17 +2525,17 @@ mod tests {
             column_aligns: vec![],
             span: None,
         };
-        let node_cx = NodeContext {
-            style: TextViewStyle::default().with_inline_code_font_family(Some(MONO.into())),
-            ..Default::default()
-        };
+        let node_cx = NodeContext::default();
 
         let mut app = TestApp::with_text_system(Arc::new(WideMonoTextSystem));
         let mut window = app.open_window(|_, _| Empty);
-        let (col_w, font_size) = window.update(|_, window, _| {
+        let (col_w, font_size) = window.update(|_, window, cx| {
+            let mut theme = crate::Theme::default();
+            theme.tokens.typography.mono = MONO.into();
+            cx.set_global(theme);
             let font_size = window.text_style().font_size.to_pixels(window.rem_size());
             (
-                measure_table_columns(&table, 1, &node_cx, window),
+                measure_table_columns(&table, 1, &node_cx, window, cx),
                 font_size,
             )
         });
