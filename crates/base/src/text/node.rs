@@ -20,8 +20,10 @@ use crate::{
         CodeBlockActionsFn, CodeBlockHighlighterFn, LinkClickHandlerFn, MarkdownExtensions,
         MarkdownNode, TableActionsFn,
         document::NodeRenderOptions,
-        inline::{Inline, InlineHighlight, InlineState, combine_highlights, text_runs},
-        inline_flow::{InlineFlow, InlineFlowItem},
+        inline::{
+            Inline, InlineHighlight, InlineState, combine_highlights, text_runs, text_size_ranges,
+        },
+        inline_flow::{InlineFlow, InlineFlowItem, slice_ranges},
         text_view::handle_link_click,
     },
     theme::ActiveTheme as _,
@@ -1390,6 +1392,7 @@ fn mark_highlight(mark: &TextMark, node_cx: &NodeContext, cx: &App) -> InlineHig
     InlineHighlight {
         style: highlight,
         font_family,
+        font_size_scale: mark.code.then_some(0.875),
     }
 }
 
@@ -1562,7 +1565,11 @@ impl Paragraph {
     fn should_render_inline_flow(&self) -> bool {
         let has_image = self.children.iter().any(|child| child.image.is_some());
         let has_text = self.children.iter().any(|child| !child.text.is_empty());
-        has_image && has_text
+        (has_image && has_text)
+            || self
+                .children
+                .iter()
+                .any(|child| child.marks.iter().any(|(_, mark)| mark.code))
     }
 
     fn inline_flow_items(&self, node_cx: &NodeContext, cx: &mut App) -> Vec<InlineFlowItem> {
@@ -1695,11 +1702,23 @@ fn measure_table_columns(
                         })
                     })
                     .collect::<Vec<_>>();
-                let runs = text_runs(line.len(), &text_style, &line_highlights);
-                let line_w = window
-                    .text_system()
-                    .layout_line(line, font_size, &runs, None)
-                    .width;
+                let mut line_w = gpui::Pixels::ZERO;
+                for (range, scale) in text_size_ranges(line.len(), &line_highlights) {
+                    let highlights = slice_ranges(
+                        &line_highlights,
+                        range.start,
+                        range.end,
+                        |range, highlight| (range, highlight.clone()),
+                    );
+                    if highlights.iter().any(|(_, h)| h.font_size_scale.is_some()) {
+                        line_w += px(crate::text::inline_flow::INLINE_CODE_PADDING * 2.);
+                    }
+                    let runs = text_runs(range.len(), &text_style, &highlights);
+                    line_w += window
+                        .text_system()
+                        .layout_line(&line[range], font_size * scale, &runs, None)
+                        .width;
+                }
                 w = w.max(f32::from(line_w));
             }
             // Border-box widths, so the padding and border the cell draws
@@ -2540,9 +2559,12 @@ mod tests {
             )
         });
 
-        let mono_w = f32::from(WideMonoTextSystem::width_of(code, MONO, font_size));
+        let mono_w = f32::from(WideMonoTextSystem::width_of(code, MONO, font_size * 0.875));
         assert!(
-            col_w[0] >= mono_w + CELL_PAD_PX,
+            (col_w[0]
+                - (mono_w + CELL_PAD_PX + crate::text::inline_flow::INLINE_CODE_PADDING * 2.))
+                .abs()
+                < 0.01,
             "col_w {} must fit the mono width {} plus padding {}",
             col_w[0],
             mono_w,

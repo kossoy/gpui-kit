@@ -31,6 +31,7 @@ use crate::{
 pub(super) struct InlineHighlight {
     pub(super) style: HighlightStyle,
     pub(super) font_family: Option<SharedString>,
+    pub(super) font_size_scale: Option<f32>,
 }
 
 impl InlineHighlight {
@@ -39,6 +40,9 @@ impl InlineHighlight {
         self.style = self.style.highlight(other.style);
         if other.font_family.is_some() {
             self.font_family = other.font_family.clone();
+        }
+        if other.font_size_scale.is_some() {
+            self.font_size_scale = other.font_size_scale;
         }
         self
     }
@@ -49,6 +53,7 @@ impl From<HighlightStyle> for InlineHighlight {
         Self {
             style,
             font_family: None,
+            font_size_scale: None,
         }
     }
 }
@@ -122,6 +127,36 @@ pub(super) fn text_runs(
     runs
 }
 
+/// Splits text into contiguous ranges sharing one font size. GPUI runs can
+/// vary the font but not its size, so each range needs its own shaped line.
+pub(super) fn text_size_ranges(
+    text_len: usize,
+    highlights: &[(Range<usize>, InlineHighlight)],
+) -> Vec<(Range<usize>, f32)> {
+    let mut ranges: Vec<(Range<usize>, f32)> = Vec::new();
+    let mut push = |range: Range<usize>, scale: f32| {
+        if range.is_empty() {
+            return;
+        }
+        if let Some((last, last_scale)) = ranges.last_mut()
+            && *last_scale == scale
+            && last.end == range.start
+        {
+            last.end = range.end;
+        } else {
+            ranges.push((range, scale));
+        }
+    };
+    let mut cursor = 0;
+    for (range, highlight) in highlights {
+        push(cursor..range.start, 1.);
+        push(range.clone(), highlight.font_size_scale.unwrap_or(1.));
+        cursor = range.end;
+    }
+    push(cursor..text_len, 1.);
+    ranges
+}
+
 /// A inline element used to render a inline text and support selectable.
 ///
 /// All text in TextView (including the CodeBlock) used this for text rendering.
@@ -131,6 +166,8 @@ pub(super) struct Inline {
     links: Rc<Vec<(Range<usize>, LinkMark)>>,
     highlights: Vec<(Range<usize>, InlineHighlight)>,
     styled_text: StyledText,
+    paint_origin: Option<Point<Pixels>>,
+    selection_source: Option<(Arc<Mutex<InlineState>>, Range<usize>)>,
     link_click_handler: Option<Arc<LinkClickHandlerFn>>,
 
     state: Arc<Mutex<InlineState>>,
@@ -171,9 +208,26 @@ impl Inline {
             highlights,
             text: text.clone(),
             styled_text: StyledText::new(text),
+            paint_origin: None,
+            selection_source: None,
             link_click_handler,
             state,
         }
+    }
+
+    /// Preserve the shared inline-flow baseline through GPUI's element-bound snapping.
+    pub(super) fn paint_origin(mut self, origin: Point<Pixels>) -> Self {
+        self.paint_origin = Some(origin);
+        self
+    }
+
+    pub(super) fn selection_source(
+        mut self,
+        state: Arc<Mutex<InlineState>>,
+        range: Range<usize>,
+    ) -> Self {
+        self.selection_source = Some((state, range));
+        self
     }
 
     /// Get link at given mouse position.
@@ -475,6 +529,7 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) -> Self::PrepaintState {
+        let bounds = Bounds::new(self.paint_origin.unwrap_or(bounds.origin), bounds.size);
         self.styled_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
 
@@ -509,6 +564,7 @@ impl Element for Inline {
         window: &mut Window,
         cx: &mut App,
     ) {
+        let bounds = Bounds::new(self.paint_origin.unwrap_or(bounds.origin), bounds.size);
         let current_view = window.current_view();
         let hitbox = prepaint;
         let Ok(mut state) = self.state.lock() else {
@@ -524,6 +580,17 @@ impl Element for Inline {
             self.layout_selections(&text_layout, &bounds, window, cx);
 
         state.selection = selection;
+        if let Some((source, range)) = &self.selection_source
+            && let Some(selection) = selection
+            && let Ok(mut source) = source.lock()
+        {
+            let start = range.start + selection.start;
+            let end = range.start + selection.end;
+            source.selection = Some(match source.selection {
+                Some(previous) => Selection::new(previous.start.min(start), previous.end.max(end)),
+                None => Selection::new(start, end),
+            });
+        }
 
         if is_selection || is_selectable {
             window.set_cursor_style(CursorStyle::IBeam, &hitbox);
@@ -891,6 +958,7 @@ mod tests {
         InlineHighlight {
             style,
             font_family: Some(SharedString::from("Mono")),
+            font_size_scale: None,
         }
     }
 
