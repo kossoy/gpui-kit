@@ -229,7 +229,7 @@ impl TextSelectionRegistration {
     /// [`TextSelectionEvent::AutoScroll`]. Drag auto-scroll then drives it
     /// directly, measured against its own bounds, instead of synthesizing a
     /// wheel event for the nearest scrollable ancestor.
-    pub fn with_self_scroll(mut self, self_scroll: bool) -> Self {
+    pub(crate) fn with_self_scroll(mut self, self_scroll: bool) -> Self {
         self.self_scroll = self_scroll;
         self
     }
@@ -281,11 +281,6 @@ impl TextSelectionRegistration {
     /// Returns the stable logical document order.
     pub const fn document_order(&self) -> u64 {
         self.document_order
-    }
-
-    /// Returns whether the participant scrolls its own content on auto-scroll.
-    pub const fn self_scroll(&self) -> bool {
-        self.self_scroll
     }
 
     /// Returns the glyph-bearing bounds used to reject blank-only gestures.
