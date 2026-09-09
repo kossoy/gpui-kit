@@ -805,6 +805,70 @@ mod tests {
     }
 
     #[gpui::test]
+    fn held_text_view_drag_auto_scroll_extends_selection(cx: &mut TestAppContext) {
+        let source = (0..100)
+            .map(|ix| format!("Paragraph {ix} with enough text to select"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| AutoScrollTextViewTest {
+                text_view: cx.new(|cx| TextViewState::markdown(&source, cx)),
+            });
+            Root::new(view, window, cx)
+        });
+        let text_view = root.read_with(cx, |root, cx| {
+            root.view()
+                .clone()
+                .downcast::<AutoScrollTextViewTest>()
+                .unwrap()
+                .read(cx)
+                .text_view
+                .clone()
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let bounds = cx
+            .debug_bounds("scrollable-text-view")
+            .expect("scrollable TextView bounds");
+        let start = point(bounds.left() + px(30.), bounds.top() + px(30.));
+        let edge = point(bounds.left() + px(60.), bounds.bottom() - px(2.));
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(edge, Some(MouseButton::Left), Modifiers::default());
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        let before = window_selected_text(cx);
+        assert!(!before.is_empty(), "the drag must start a text selection");
+        // Each tick paints the newly scrolled blocks, with no further mouse moves.
+        for _ in 0..12 {
+            cx.executor().advance_clock(Duration::from_millis(16));
+            cx.run_until_parked();
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        }
+        let after = window_selected_text(cx);
+        cx.simulate_mouse_up(edge, MouseButton::Left, Modifiers::default());
+        assert!(
+            after.len() > before.len(),
+            "holding at edge must expand selection: before={before:?}, after={after:?}"
+        );
+        let stopped_at = list_scroll_px(&text_view, cx);
+        cx.executor().advance_clock(Duration::from_millis(64));
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+        assert_eq!(list_scroll_px(&text_view, cx), stopped_at);
+        assert_eq!(window_selected_text(cx), after);
+    }
+
+    #[gpui::test]
     fn compatibility_text_view_drag_selection_auto_scrolls_both_directions(
         cx: &mut TestAppContext,
     ) {
@@ -933,6 +997,76 @@ mod tests {
         assert!(
             moved > px(0.),
             "dragging to the clipping edge must scroll the padded list, moved {moved:?}"
+        );
+    }
+
+    struct ClippedReaderAutoScrollTest {
+        text_view: Entity<TextViewState>,
+    }
+
+    // A TextView taller than its clipping ancestor.
+    impl Render for ClippedReaderAutoScrollTest {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div()
+                    .debug_selector(|| "reader".into())
+                    .flex()
+                    .flex_row()
+                    .h(px(300.))
+                    .min_w(px(0.))
+                    .overflow_hidden()
+                    .justify_center()
+                    .child(
+                        TextView::new(&self.text_view)
+                            .scrollable(true)
+                            .selectable(true)
+                            .h(px(600.))
+                            .flex_none()
+                            .w_full()
+                            .max_w(relative(0.85))
+                            .mx_auto(),
+                    ),
+            )
+        }
+    }
+
+    #[gpui::test]
+    fn clipped_reader_text_view_auto_scrolls_at_the_visible_edge(cx: &mut TestAppContext) {
+        let source = (0..100)
+            .map(|ix| format!("Paragraph {ix} with enough text to select"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        cx.update(crate::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let view = cx.new(|cx| ClippedReaderAutoScrollTest {
+                text_view: cx.new(|cx| TextViewState::markdown(&source, cx)),
+            });
+            Root::new(view, window, cx)
+        });
+        let view = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<ClippedReaderAutoScrollTest>()
+                .unwrap()
+        });
+        let cx: &mut VisualTestContext = cx;
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let reader = cx.debug_bounds("reader").expect("reader bounds");
+        let text_view = view.read_with(cx, |view, _| view.text_view.clone());
+        let list_bounds = text_view.read_with(cx, |state, _| state.list_state().viewport_bounds());
+        assert!(list_bounds.bottom() > reader.bottom() + px(100.));
+
+        // The visible edge is well above the TextView's own bottom.
+        let start = point(reader.center().x, reader.top() + px(40.));
+        let edge = point(reader.center().x, reader.bottom() - px(2.));
+        let moved = drag_and_hold(&text_view, start, edge, 4, cx);
+        assert!(
+            moved > px(0.),
+            "dragging to the clipping edge must scroll the clipped list, moved {moved:?}"
         );
     }
 

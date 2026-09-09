@@ -848,6 +848,7 @@ struct WindowSelectionState {
     did_hit_text: bool,
     frame_generation: u64,
     finish_frame_scheduled: bool,
+    refresh_held_cursor: bool,
     mouse_down_prepared: bool,
     auto_scroll: AutoScroll,
 }
@@ -1012,6 +1013,20 @@ impl WindowSelectionState {
         cx: &mut App,
     ) {
         self.prune_dead_participants();
+        if self.is_selecting
+            && registration.self_scroll
+            && self.anchor.as_ref().and_then(SelectionEndpoint::entity_id)
+                == Some(selection.entity_id())
+            && self
+                .participants
+                .get(&selection.entity_id())
+                .is_some_and(|previous| {
+                    previous.registration.scroll_offset != registration.scroll_offset
+                        || previous.registration.bounds != registration.bounds
+                })
+        {
+            self.refresh_held_cursor = true;
+        }
         self.participants.insert(
             selection.entity_id(),
             ParticipantRegistration {
@@ -1538,12 +1553,19 @@ impl WindowSelectionState {
     }
 
     /// Drives the anchor participant's own scrolling, measured against the
-    /// participant's element bounds rather than any ancestor viewport.
+    /// visible portion of the participant's element bounds.
     fn update_participant_auto_scroll(&self, position: Point<Pixels>, cx: &mut App) {
         let Some((participant, registration)) = self.anchor_registration() else {
             return;
         };
-        let delta = AutoScroll::compute_delta(position.y, registration.bounds);
+        let visible_bounds = registration
+            .bounds
+            .intersect(&registration.hitbox.content_mask.bounds);
+        let delta = if visible_bounds.size.width > px(0.) && visible_bounds.size.height > px(0.) {
+            AutoScroll::compute_delta(position.y, visible_bounds)
+        } else {
+            None
+        };
         participant.update(cx, |state, cx| state.set_auto_scroll(delta, cx));
     }
 
@@ -1892,12 +1914,25 @@ fn retain_text_selection_state(
 fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Window, cx: &mut App) {
     if state.update(cx, |state, _| state.schedule_finish_frame()) {
         let state = state.downgrade();
-        window.defer(cx, move |_, cx| {
+        window.defer(cx, move |window, cx| {
             let Some(state) = state.upgrade() else {
                 return;
             };
             let handlers = state.update(cx, |state, cx| state.finish_frame(cx));
             dispatch_clear_handlers(handlers, cx);
+            // Direct participant scrolling produces no wheel event. Refresh
+            // the held cursor after paint registers the new scroll geometry.
+            let refresh_cursor = state.update(cx, |state, cx| {
+                if std::mem::take(&mut state.refresh_held_cursor) && state.is_selecting {
+                    state.update_in_window(window.mouse_position(), window, cx);
+                    true
+                } else {
+                    false
+                }
+            });
+            if refresh_cursor {
+                WindowSelectionState::resolve_content_keys(&state, cx);
+            }
         });
     }
 
